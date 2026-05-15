@@ -16,15 +16,16 @@ sh script_train_cpgg.sh
 ```
 sh script_sample.sh
 ```
-我的补充：
+## 我的补充
 现在 requirements.txt 直接安装还不够，主要剩这些：
 
 PyTorch CUDA wheel 源
 
 建议先单独装 torch/torchvision：
-
+```
 pip install torch==2.4.1 torchvision==0.19.1 --index-url https://download.pytorch.org/whl/cu121
 pip install -r requirements.txt
+```
 
 LPIPS 权重文件 vgg.pth
 
@@ -32,8 +33,9 @@ LPIPS 权重文件 vgg.pth
 
 CPGG/taming/modules/autoencoder/lpips/vgg.pth
 验证：
-
+```
 python -c "import torch; p='taming/modules/autoencoder/lpips/vgg.pth'; ckpt=torch.load(p, map_location='cpu'); print(type(ckpt)); print(list(ckpt.keys())[:5])"
+```
 训练时环境变量
 
 跑 3D VAE 建议带上：
