@@ -24,6 +24,13 @@ def update_ema(target_params, source_params, rate=0.99):
         targ.detach().mul_(rate).add_(src, alpha=1 - rate)
 
 
+def set_requires_grad(module, requires_grad):
+    if module is None:
+        return
+    for param in module.parameters():
+        param.requires_grad_(requires_grad)
+
+
 def train_one_epoch(model,
                     data_loader: Iterable,
                     optimizer: torch.optim.Optimizer,
@@ -55,6 +62,9 @@ def train_one_epoch(model,
         inputs = model_without_ddp.get_input(samples)
         start_frame = 0
 
+        set_requires_grad(getattr(model_without_ddp.loss, "discriminator_2d", None), False)
+        set_requires_grad(getattr(model_without_ddp.loss, "discriminator", None), False)
+
         with torch.cuda.amp.autocast():
             reconstructions, posterior, motion = model(inputs)
             aeloss, log_dict_ae = model_without_ddp.loss(inputs[:, :, start_frame:], reconstructions, posterior, 0, model_without_ddp.global_step, last_layer=model_without_ddp.get_last_layer(), split="train")
@@ -67,6 +77,9 @@ def train_one_epoch(model,
             params.append(model_without_ddp.loss.logvar)
         loss_scaler(aeloss, optimizer, clip_grad=args.grad_clip, parameters=params, update_grad=True)
         optimizer.zero_grad()
+
+        set_requires_grad(getattr(model_without_ddp.loss, "discriminator_2d", None), True)
+        set_requires_grad(getattr(model_without_ddp.loss, "discriminator", None), True)
 
         with torch.cuda.amp.autocast():
             discloss, log_dict_disc = model_without_ddp.loss(inputs[:, :, start_frame:], reconstructions, posterior, 1, model_without_ddp.global_step,last_layer=model_without_ddp.get_last_layer(), split="train")
