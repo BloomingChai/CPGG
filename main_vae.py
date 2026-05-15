@@ -65,6 +65,10 @@ def get_args_parser():
     parser.add_argument('--start_epoch', default=0, type=int, metavar='N',
                         help='start epoch')
     parser.add_argument('--num_workers', default=10, type=int)
+    parser.add_argument('--persistent_workers', action='store_true',
+                        help='Keep DataLoader workers alive between epochs.')
+    parser.add_argument('--prefetch_factor', default=2, type=int,
+                        help='Number of batches prefetched by each DataLoader worker.')
     parser.add_argument('--pin_mem', action='store_true',
                         help='Pin CPU memory in DataLoader for more efficient (sometimes) transfer to GPU.')
     parser.add_argument('--no_pin_mem', action='store_false', dest='pin_mem')
@@ -123,34 +127,62 @@ def main(args):
     print(dataset_train)
     dataset_val = UKBCMR2DValidation()
 
+    if args.distributed:
+        sampler_train = torch.utils.data.DistributedSampler(
+            dataset_train,
+            num_replicas=num_tasks,
+            rank=global_rank,
+            shuffle=True,
+        )
+        sampler_val = torch.utils.data.DistributedSampler(
+            dataset_val,
+            num_replicas=num_tasks,
+            rank=global_rank,
+            shuffle=False,
+            drop_last=False,
+        )
+    else:
+        sampler_train = None
+        sampler_val = None
+
+    loader_kwargs = {
+        "num_workers": args.num_workers,
+        "pin_memory": args.pin_mem,
+        "persistent_workers": args.persistent_workers and args.num_workers > 0,
+    }
+    if args.num_workers > 0:
+        loader_kwargs["prefetch_factor"] = args.prefetch_factor
+
     data_loader_train = torch.utils.data.DataLoader(
         dataset_train,
         batch_size=args.batch_size,
-        num_workers=args.num_workers,
-        pin_memory=args.pin_mem,
         drop_last=True,
-        shuffle=True,
+        sampler=sampler_train,
+        shuffle=sampler_train is None,
+        **loader_kwargs,
     )
     data_loader_validation = torch.utils.data.DataLoader(
         dataset_val,
         batch_size=args.batch_size,
-        num_workers=args.num_workers,
-        pin_memory=args.pin_mem,
         drop_last=False,
+        sampler=sampler_val,
         shuffle=False,
+        **loader_kwargs,
     )
     from omegaconf import OmegaConf
     model_config = OmegaConf.load(args.cfg)
     # Save args to a yaml file
     args_dict = vars(args)
     args_yaml_path = os.path.join(args.output_dir, 'config/args.yaml')
-    with open(args_yaml_path, 'w') as f:
-        OmegaConf.save(config=OmegaConf.create(args_dict), f=f)
+    if misc.is_main_process():
+        with open(args_yaml_path, 'w') as f:
+            OmegaConf.save(config=OmegaConf.create(args_dict), f=f)
 
     # Save model_config to a yaml file
     model_config_yaml_path = os.path.join(args.output_dir, 'config/model_config.yaml')
-    with open(model_config_yaml_path, 'w') as f:
-        OmegaConf.save(config=model_config, f=f)
+    if misc.is_main_process():
+        with open(model_config_yaml_path, 'w') as f:
+            OmegaConf.save(config=model_config, f=f)
     model = vae3d.__dict__[args.model](
         lossconfig=model_config.model.params.lossconfig, 
         ddconfig=model_config.model.params.ddconfig, 
@@ -164,6 +196,7 @@ def main(args):
     print("Number of trainable parameters: {}M".format(n_params / 1e6))
 
     model.to(device)
+    model_without_ddp = model
 
     eff_batch_size = args.batch_size * misc.get_world_size()
 
@@ -174,22 +207,30 @@ def main(args):
     print("actual lr: %.2e" % args.lr)
     print("effective batch size: %d" % eff_batch_size)
 
-    params = list(model.encoder_3d.parameters())+ list(model.decoder.parameters())+ \
-                        list(model.quant_conv.parameters())+ list(model.post_quant_conv.parameters())
+    if args.distributed:
+        model = torch.nn.parallel.DistributedDataParallel(
+            model,
+            device_ids=[args.gpu],
+            find_unused_parameters=False,
+        )
+        model_without_ddp = model.module
+
+    params = list(model_without_ddp.encoder_3d.parameters())+ list(model_without_ddp.decoder.parameters())+ \
+                        list(model_without_ddp.quant_conv.parameters())+ list(model_without_ddp.post_quant_conv.parameters())
         
-    if model.enable_2d:
-        params += list(model.encoder_2d.parameters())
+    if model_without_ddp.enable_2d:
+        params += list(model_without_ddp.encoder_2d.parameters())
             
-    if model.loss.logvar.requires_grad:
-        params.append(model.loss.logvar)
+    if model_without_ddp.loss.logvar.requires_grad:
+        params.append(model_without_ddp.loss.logvar)
 
     optimizer = torch.optim.AdamW(params, lr=args.lr, betas=(0.9, 0.95), weight_decay=args.weight_decay)
 
     disc_params = []
-    if model.loss.enable_2d:
-        disc_params  +=  list(model.loss.discriminator_2d.parameters())
-    if model.loss.enable_3d:
-        disc_params  +=  list(model.loss.discriminator.parameters())
+    if model_without_ddp.loss.enable_2d:
+        disc_params  +=  list(model_without_ddp.loss.discriminator_2d.parameters())
+    if model_without_ddp.loss.enable_3d:
+        disc_params  +=  list(model_without_ddp.loss.discriminator.parameters())
     optimizer_d = torch.optim.AdamW(disc_params, lr=float(args.disc_loss_scale) * float(args.lr), betas=(0.9, 0.95), weight_decay=args.weight_decay)
     print(optimizer)
     print(optimizer_d)
@@ -198,10 +239,10 @@ def main(args):
     # resume training
     if args.resume and os.path.exists(os.path.join(args.resume, "checkpoint-last.pth")):
         checkpoint = torch.load(os.path.join(args.resume, "checkpoint-last.pth"), map_location='cpu')
-        model.load_state_dict(checkpoint['model'])
-        model_params = list(model.parameters())
+        model_without_ddp.load_state_dict(checkpoint['model'])
+        model_params = list(model_without_ddp.parameters())
         ema_state_dict = checkpoint['model_ema']
-        ema_params = [ema_state_dict[name].cuda() for name, _ in model.named_parameters()]
+        ema_params = [ema_state_dict[name].cuda() for name, _ in model_without_ddp.named_parameters()]
         print("Resume checkpoint %s" % args.resume)
 
         if 'optimizer' in checkpoint and 'epoch' in checkpoint:
@@ -212,7 +253,7 @@ def main(args):
             print("With optim & sched!")
         del checkpoint
     else:
-        model_params = list(model.parameters())
+        model_params = list(model_without_ddp.parameters())
         print("Training from scratch")
 
 
@@ -235,14 +276,14 @@ def main(args):
 
         # save checkpoint
         if epoch % args.save_last_freq == 0 or epoch + 1 == args.epochs:
-            torch.save(model.state_dict(), os.path.join(args.output_dir, f"checkpoint-{epoch:04d}.pth"))
+            misc.save_on_master(model_without_ddp.state_dict(), os.path.join(args.output_dir, f"checkpoint-{epoch:04d}.pth"))
 
         # online evaluation
-        if args.online_eval and (epoch % args.eval_freq == 0 or epoch + 1 == args.epochs):
+        if misc.is_main_process() and args.online_eval and (epoch % args.eval_freq == 0 or epoch + 1 == args.epochs):
             torch.cuda.empty_cache()
             if args.debug:
                 args.limit_num = 1
-            evaluate(model, data_loader_validation, args, epoch, log_writer=log_writer, limit_num=args.limit_num, device=device)
+            evaluate(model_without_ddp, data_loader_validation, args, epoch, log_writer=log_writer, limit_num=args.limit_num, device=device)
             torch.cuda.empty_cache()
 
         if misc.is_main_process():

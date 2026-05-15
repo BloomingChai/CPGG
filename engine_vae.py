@@ -32,6 +32,7 @@ def train_one_epoch(model,
                     log_writer=None,
                     args=None):
     model.train(True)
+    model_without_ddp = model.module if hasattr(model, "module") else model
     metric_logger = misc.MetricLogger(delimiter="  ")
     metric_logger.add_meter('lr', misc.SmoothedValue(window_size=1, fmt='{value:.6f}'))
     header = 'Epoch: [{}]'.format(epoch)
@@ -51,34 +52,34 @@ def train_one_epoch(model,
         samples = samples.to(device, non_blocking=True)
         # labels = labels.to(device, non_blocking=True)
 
-        inputs = model.get_input(samples)
+        inputs = model_without_ddp.get_input(samples)
         start_frame = 0
 
         with torch.cuda.amp.autocast():
             reconstructions, posterior, motion = model(inputs)
-            aeloss, log_dict_ae = model.loss(inputs[:, :, start_frame:], reconstructions, posterior, 0, model.global_step, last_layer=model.get_last_layer(), split="train")
+            aeloss, log_dict_ae = model_without_ddp.loss(inputs[:, :, start_frame:], reconstructions, posterior, 0, model_without_ddp.global_step, last_layer=model_without_ddp.get_last_layer(), split="train")
 
-        params = list(model.encoder_3d.parameters())+ list(model.decoder.parameters())+ \
-                        list(model.quant_conv.parameters())+ list(model.post_quant_conv.parameters())
-        if model.enable_2d:
-            params += list(model.encoder_2d.parameters())  
-        if model.loss.logvar.requires_grad:
-            params.append(model.loss.logvar)
+        params = list(model_without_ddp.encoder_3d.parameters())+ list(model_without_ddp.decoder.parameters())+ \
+                        list(model_without_ddp.quant_conv.parameters())+ list(model_without_ddp.post_quant_conv.parameters())
+        if model_without_ddp.enable_2d:
+            params += list(model_without_ddp.encoder_2d.parameters())  
+        if model_without_ddp.loss.logvar.requires_grad:
+            params.append(model_without_ddp.loss.logvar)
         loss_scaler(aeloss, optimizer, clip_grad=args.grad_clip, parameters=params, update_grad=True)
         optimizer.zero_grad()
 
         with torch.cuda.amp.autocast():
-            discloss, log_dict_disc = model.loss(inputs[:, :, start_frame:], reconstructions, posterior, 1, model.global_step,last_layer=model.get_last_layer(), split="train")
+            discloss, log_dict_disc = model_without_ddp.loss(inputs[:, :, start_frame:], reconstructions, posterior, 1, model_without_ddp.global_step,last_layer=model_without_ddp.get_last_layer(), split="train")
 
         disc_params = []
-        if model.loss.enable_2d:
-            disc_params  +=  list(model.loss.discriminator_2d.parameters())
-        if model.loss.enable_3d:
-            disc_params  +=  list(model.loss.discriminator.parameters())
+        if model_without_ddp.loss.enable_2d:
+            disc_params  +=  list(model_without_ddp.loss.discriminator_2d.parameters())
+        if model_without_ddp.loss.enable_3d:
+            disc_params  +=  list(model_without_ddp.loss.discriminator.parameters())
         loss_scaler(discloss, optimizer_d, clip_grad=args.grad_clip, parameters=disc_params, update_grad=True)
         optimizer_d.zero_grad()
 
-        model.global_step += 1
+        model_without_ddp.global_step += 1
         loss_value = aeloss.item()
 
         if not math.isfinite(loss_value):
