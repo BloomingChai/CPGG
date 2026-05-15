@@ -1,1 +1,31 @@
+# data
 cmr_data/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# output / checkpoints
+output/
+
+# local dataset json
+train_ukbdata.json
+val_ukbdata.json
+
+# nested python cache
+**/__pycache__/
+
+# optional: third-party submodule/vendor code
+taming/
+
+# checkpoints
+*.pth
+*.pt
+*.ckpt
+
+# logs
+logs/
+*.log
+
+# IDE
+.vscode/
