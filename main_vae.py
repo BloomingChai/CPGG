@@ -50,6 +50,10 @@ def get_args_parser():
 
     parser.add_argument('--grad_clip', type=float, default=3.0,
                         help='Gradient clip')
+    parser.add_argument('--amp', action='store_true',
+                        help='Use mixed precision training.')
+    parser.add_argument('--no_amp', action='store_false', dest='amp')
+    parser.set_defaults(amp=True)
 
     # Dataset parameters
 

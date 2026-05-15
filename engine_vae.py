@@ -65,7 +65,7 @@ def train_one_epoch(model,
         set_requires_grad(getattr(model_without_ddp.loss, "discriminator_2d", None), False)
         set_requires_grad(getattr(model_without_ddp.loss, "discriminator", None), False)
 
-        with torch.cuda.amp.autocast():
+        with torch.cuda.amp.autocast(enabled=args.amp):
             reconstructions, posterior, motion = model(inputs)
             aeloss, log_dict_ae = model_without_ddp.loss(inputs[:, :, start_frame:], reconstructions, posterior, 0, model_without_ddp.global_step, last_layer=model_without_ddp.get_last_layer(), split="train")
 
@@ -81,7 +81,7 @@ def train_one_epoch(model,
         set_requires_grad(getattr(model_without_ddp.loss, "discriminator_2d", None), True)
         set_requires_grad(getattr(model_without_ddp.loss, "discriminator", None), True)
 
-        with torch.cuda.amp.autocast():
+        with torch.cuda.amp.autocast(enabled=args.amp):
             discloss, log_dict_disc = model_without_ddp.loss(inputs[:, :, start_frame:], reconstructions, posterior, 1, model_without_ddp.global_step,last_layer=model_without_ddp.get_last_layer(), split="train")
 
         disc_params = []
@@ -97,6 +97,8 @@ def train_one_epoch(model,
 
         if not math.isfinite(loss_value):
             print("Loss is {}, stopping training".format(loss_value))
+            print("AE loss components:", log_dict_ae)
+            print("Discriminator loss components:", log_dict_disc)
             sys.exit(1)
 
         metric_logger.update(loss=loss_value)
@@ -151,7 +153,7 @@ def evaluate(model, dataloader, args, epoch, log_writer=None, limit_num=-1, devi
             samples = samples.to(device, non_blocking=True)
             x = model.get_input(samples)
             batch_size = x.shape[0]
-            with torch.cuda.amp.autocast():
+            with torch.cuda.amp.autocast(enabled=args.amp):
                 xrec, posterior, _ = model(x)
             x = rearrange(x[:, :, 0:], "b c t h w -> (b t) c h w").clamp(-1.0, 1.0)
             xrec = rearrange(xrec, "b c t h w -> (b t) c h w").clamp(-1.0, 1.0)
