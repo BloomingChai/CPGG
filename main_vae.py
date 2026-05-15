@@ -7,6 +7,7 @@ from pathlib import Path
 
 import torch
 import torch.backends.cudnn as cudnn
+from torch.distributed.elastic.multiprocessing.errors import record
 from torch.utils.tensorboard import SummaryWriter
 
 import util.misc as misc
@@ -96,6 +97,7 @@ def get_args_parser():
     return parser
 
 
+@record
 def main(args):
     misc.init_distributed_mode(args)
 
@@ -212,6 +214,7 @@ def main(args):
             model,
             device_ids=[args.gpu],
             find_unused_parameters=True,
+            static_graph=True,
         )
         model_without_ddp = model.module
 
