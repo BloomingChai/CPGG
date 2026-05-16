@@ -245,19 +245,27 @@ def main(args):
 
     # resume training
     if args.resume and os.path.exists(os.path.join(args.resume, "checkpoint-last.pth")):
-        checkpoint = torch.load(os.path.join(args.resume, "checkpoint-last.pth"), map_location='cpu')
-        model_without_ddp.load_state_dict(checkpoint['model'])
-        model_params = list(model_without_ddp.parameters())
-        ema_state_dict = checkpoint['model_ema']
-        ema_params = [ema_state_dict[name].cuda() for name, _ in model_without_ddp.named_parameters()]
-        print("Resume checkpoint %s" % args.resume)
+        checkpoint_path = os.path.join(args.resume, "checkpoint-last.pth")
+        checkpoint = torch.load(checkpoint_path, map_location='cpu')
+        print("Resume checkpoint %s" % checkpoint_path)
 
-        if 'optimizer' in checkpoint and 'epoch' in checkpoint:
-            optimizer.load_state_dict(checkpoint['optimizer'])
-            args.start_epoch = checkpoint['epoch'] + 1
+        if isinstance(checkpoint, dict) and 'model' in checkpoint:
+            model_without_ddp.load_state_dict(checkpoint['model'])
+            if 'optimizer' in checkpoint:
+                optimizer.load_state_dict(checkpoint['optimizer'])
+            if 'optimizer_d' in checkpoint:
+                optimizer_d.load_state_dict(checkpoint['optimizer_d'])
             if 'scaler' in checkpoint:
                 loss_scaler.load_state_dict(checkpoint['scaler'])
-            print("With optim & sched!")
+            if 'epoch' in checkpoint:
+                args.start_epoch = checkpoint['epoch'] + 1
+            if 'global_step' in checkpoint:
+                model_without_ddp.global_step = checkpoint['global_step']
+            print("Resumed full training state")
+        else:
+            model_without_ddp.load_state_dict(checkpoint)
+            print("Resumed model weights only")
+        model_params = list(model_without_ddp.parameters())
         del checkpoint
     else:
         model_params = list(model_without_ddp.parameters())
@@ -283,7 +291,17 @@ def main(args):
 
         # save checkpoint
         if epoch % args.save_last_freq == 0 or epoch + 1 == args.epochs:
-            misc.save_on_master(model_without_ddp.state_dict(), os.path.join(args.output_dir, f"checkpoint-{epoch:04d}.pth"))
+            checkpoint = {
+                'model': model_without_ddp.state_dict(),
+                'optimizer': optimizer.state_dict(),
+                'optimizer_d': optimizer_d.state_dict(),
+                'epoch': epoch,
+                'global_step': model_without_ddp.global_step,
+                'scaler': loss_scaler.state_dict(),
+                'args': args,
+            }
+            misc.save_on_master(checkpoint, os.path.join(args.output_dir, "checkpoint-last.pth"))
+            misc.save_on_master(checkpoint, os.path.join(args.output_dir, f"checkpoint-{epoch:04d}.pth"))
 
         # online evaluation
         if misc.is_main_process() and args.online_eval and (epoch % args.eval_freq == 0 or epoch + 1 == args.epochs):
